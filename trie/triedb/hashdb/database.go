@@ -17,6 +17,7 @@
 package hashdb
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"reflect"
@@ -640,4 +641,57 @@ type reader struct {
 func (reader *reader) Node(owner common.Hash, path []byte, hash common.Hash) ([]byte, error) {
 	blob, _ := reader.db.Node(hash)
 	return blob, nil
+}
+
+type iterateNodeCallback struct {
+	f     func(hash common.Hash)
+	db    *Database
+	err   error
+	nodes [][]byte
+}
+
+func (i *iterateNodeCallback) ForEach(node []byte, onChild func(common.Hash)) {
+	for _, fnode := range i.nodes {
+		if bytes.Equal(fnode, node) {
+			return
+		}
+	}
+	i.nodes = append(i.nodes, node)
+	for _, v := range i.db.dirties {
+		if bytes.Equal(v.node, node) {
+			v.forChildren(i, func(child common.Hash) {
+				if i.err == nil {
+					i.err = i.db.IterateNodeAtRoot(child, onChild)
+				}
+			})
+		}
+	}
+}
+
+func (db *Database) IterateNodeAtRoot(hash common.Hash, callback func(common.Hash)) error {
+	// If the node does not exist, it's a previously committed node
+	node, ok := db.dirties[hash]
+	if !ok {
+		return nil
+	}
+	var err error
+	icb := &iterateNodeCallback{f: callback, nodes: append([][]byte{}, node.node)}
+	node.forChildren(icb, func(child common.Hash) {
+		if err == nil {
+			err = db.IterateNodeAtRoot(child, callback)
+		}
+	})
+	if icb.err != nil {
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	callback(hash)
+	return nil
+}
+
+func (db *Database) NodeIsDirty(node common.Hash) bool {
+	_, ok := db.dirties[node]
+	return ok
 }

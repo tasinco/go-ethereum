@@ -35,6 +35,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/state/rtpruner"
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -46,6 +47,7 @@ import (
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/rtprunerutils"
 	"github.com/ethereum/go-ethereum/trie"
 	"golang.org/x/exp/slices"
 )
@@ -224,6 +226,7 @@ type BlockChain struct {
 	processor  Processor // Block transaction processor interface
 	forker     *ForkChoice
 	vmConfig   vm.Config
+	pruner     rtpruner.Pruner
 }
 
 // NewBlockChain returns a fully initialised block chain using information
@@ -233,6 +236,9 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, genesis *Genesis
 	if cacheConfig == nil {
 		cacheConfig = defaultCacheConfig
 	}
+
+	db = rtprunerutils.NewInterceptDatabase(db)
+
 	// Open trie database with provided config
 	triedb := trie.NewDatabaseWithConfig(db, &trie.Config{
 		Cache:     cacheConfig.TrieCleanLimit,
@@ -269,6 +275,7 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, genesis *Genesis
 		futureBlocks:  lru.NewCache[common.Hash, *types.Block](maxFutureBlocks),
 		engine:        engine,
 		vmConfig:      vmConfig,
+		pruner:        rtpruner.NewNoPruner(),
 	}
 	bc.flushInterval.Store(int64(cacheConfig.TrieTimeLimit))
 	bc.forker = NewForkChoice(bc, shouldPreserve)
@@ -402,6 +409,19 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, genesis *Genesis
 			AsyncBuild: !bc.cacheConfig.SnapshotWait,
 		}
 		bc.snaps, _ = snapshot.New(snapconfig, bc.db, bc.triedb, head.Root)
+	}
+
+	if true {
+		if bc.snaps != nil {
+			pruner, err := rtpruner.New(bc.stateCache.TrieDB(), bc.db, bc.snaps)
+			if err != nil {
+				log.Error("failed to initialize super pruner", "err", err)
+			} else {
+				bc.pruner = pruner
+			}
+		} else {
+			log.Error("super prune enabled without snapshots")
+		}
 	}
 
 	// Start future block processor.
@@ -560,6 +580,7 @@ func (bc *BlockChain) SetHeadWithTimestamp(timestamp uint64) error {
 		return fmt.Errorf("current block missing: #%d [%x..]", header.Number, header.Hash().Bytes()[:4])
 	}
 	bc.chainHeadFeed.Send(ChainHeadEvent{Block: block})
+
 	return nil
 }
 
@@ -1340,6 +1361,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	if err != nil {
 		return err
 	}
+	bc.pruner.ConsumeTrieAtRoot(block.Root())
 	// If we're running an archive node, always flush
 	if bc.cacheConfig.TrieDirtyDisabled {
 		return bc.triedb.Commit(root, false)

@@ -21,8 +21,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"sync"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -30,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/rtprunerutils"
 	"github.com/ethereum/go-ethereum/trie"
 )
 
@@ -170,7 +169,7 @@ type Tree struct {
 	diskdb ethdb.KeyValueStore      // Persistent database to store the snapshot
 	triedb *trie.Database           // In-memory cache to access the trie through
 	layers map[common.Hash]snapshot // Collection of all known layers
-	lock   sync.RWMutex
+	lock   rtprunerutils.Locker
 
 	// Test hooks
 	onFlatten func() // Hook invoked when the bottom most diff layers are flattened
@@ -789,7 +788,6 @@ func (t *Tree) Verify(root common.Hash) error {
 		}
 		return hash, nil
 	}, newGenerateStats(), true)
-
 	if err != nil {
 		return err
 	}
@@ -845,10 +843,24 @@ func (t *Tree) generating() (bool, error) {
 	return layer.genMarker != nil, nil
 }
 
+func (t *Tree) Generating() bool {
+	generating, err := t.generating()
+	if err != nil {
+		generating = true
+	}
+	return generating
+}
+
 // DiskRoot is a external helper function to return the disk layer root.
 func (t *Tree) DiskRoot() common.Hash {
 	t.lock.Lock()
 	defer t.lock.Unlock()
-
+	return t.DiskRootNoLock()
+}
+func (t *Tree) DiskRootNoLock() common.Hash {
 	return t.diskRoot()
+}
+
+func (t *Tree) Locker() *rtprunerutils.Locker {
+	return &t.lock
 }

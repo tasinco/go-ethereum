@@ -22,6 +22,7 @@ import (
 	"github.com/VictoriaMetrics/fastcache"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/rtprunerutils"
 	"github.com/ethereum/go-ethereum/trie/triedb/hashdb"
 	"github.com/ethereum/go-ethereum/trie/trienode"
 	"github.com/ethereum/go-ethereum/trie/triestate"
@@ -72,6 +73,9 @@ type Database struct {
 	cleans    *fastcache.Cache // Megabytes permitted using for read caches
 	preimages *preimageStore   // The store for caching preimages
 	backend   backend          // The backend for managing trie nodes
+
+	interceptDb *rtprunerutils.InterceptDatabase
+	locker      rtprunerutils.Locker
 }
 
 // prepare initializes the database with provided configs, but the
@@ -103,7 +107,13 @@ func NewDatabase(diskdb ethdb.Database) *Database {
 // The path-based scheme is not activated yet, always initialized with legacy
 // hash-based scheme by default.
 func NewDatabaseWithConfig(diskdb ethdb.Database, config *Config) *Database {
+	var interceptDb *rtprunerutils.InterceptDatabase
+	if wdb, ok := diskdb.(*rtprunerutils.InterceptDatabase); ok {
+		interceptDb = wdb
+	}
+
 	db := prepare(diskdb, config)
+	db.interceptDb = interceptDb
 	db.backend = hashdb.New(diskdb, db.cleans, mptResolver{})
 	return db
 }
@@ -132,6 +142,12 @@ func (db *Database) Update(root common.Hash, parent common.Hash, nodes *trienode
 // to disk. As a side effect, all pre-images accumulated up to this point are
 // also written.
 func (db *Database) Commit(root common.Hash, report bool) error {
+	db.locker.RLock()
+	defer db.locker.RUnlock()
+	return db.CommitNoLock(root, report)
+}
+
+func (db *Database) CommitNoLock(root common.Hash, report bool) error {
 	if db.preimages != nil {
 		db.preimages.commit(true)
 	}
@@ -184,6 +200,9 @@ func (db *Database) WritePreimages() {
 //
 // It's only supported by hash-based database and will return an error for others.
 func (db *Database) Cap(limit common.StorageSize) error {
+	db.locker.RLock()
+	defer db.locker.RUnlock()
+
 	hdb, ok := db.backend.(*hashdb.Database)
 	if !ok {
 		return errors.New("not supported")
@@ -200,6 +219,9 @@ func (db *Database) Cap(limit common.StorageSize) error {
 //
 // It's only supported by hash-based database and will return an error for others.
 func (db *Database) Reference(root common.Hash, parent common.Hash) error {
+	db.locker.RLock()
+	defer db.locker.RUnlock()
+
 	hdb, ok := db.backend.(*hashdb.Database)
 	if !ok {
 		return errors.New("not supported")
@@ -211,6 +233,9 @@ func (db *Database) Reference(root common.Hash, parent common.Hash) error {
 // Dereference removes an existing reference from a root node. It's only
 // supported by hash-based database and will return an error for others.
 func (db *Database) Dereference(root common.Hash) error {
+	db.locker.RLock()
+	defer db.locker.RUnlock()
+
 	hdb, ok := db.backend.(*hashdb.Database)
 	if !ok {
 		return errors.New("not supported")
@@ -223,9 +248,40 @@ func (db *Database) Dereference(root common.Hash) error {
 // only supported by hash-based database and will return an error for others.
 // Note, this function should be deprecated once ETH66 is deprecated.
 func (db *Database) Node(hash common.Hash) ([]byte, error) {
+	db.locker.RLock()
+	defer db.locker.RUnlock()
+
 	hdb, ok := db.backend.(*hashdb.Database)
 	if !ok {
 		return nil, errors.New("not supported")
 	}
 	return hdb.Node(hash)
+}
+
+func (db *Database) NodeIsDirty(node common.Hash) (bool, error) {
+	hdb, ok := db.backend.(*hashdb.Database)
+	if !ok {
+		return false, errors.New("not supported")
+	}
+	return hdb.NodeIsDirty(node), nil
+}
+
+func (db *Database) IterateNodeAtRoot(node common.Hash, callback func(common.Hash)) error {
+	if err := db.iterateNodeAtRoot(node, callback); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (db *Database) iterateNodeAtRoot(hash common.Hash, callback func(common.Hash)) error {
+	hdb, ok := db.backend.(*hashdb.Database)
+	if !ok {
+		return errors.New("not supported")
+	}
+
+	return hdb.IterateNodeAtRoot(hash, callback)
+}
+
+func (db *Database) Locker() *rtprunerutils.Locker {
+	return &db.locker
 }
